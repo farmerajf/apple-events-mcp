@@ -493,13 +493,30 @@ class MCPServer {
     private func handleRequest(_ line: String) {
         guard let data = line.data(using: .utf8) else { return }
 
+        // Try to decode the request to get the ID for error responses
+        var requestId: MCPRequest.RequestID?
+        if let partialRequest = try? JSONDecoder().decode(MCPRequest.self, from: data) {
+            requestId = partialRequest.id
+        }
+
         do {
             let request = try JSONDecoder().decode(MCPRequest.self, from: data)
             let response = try processRequest(request)
             sendResponse(response)
         } catch {
             logError("Error processing request: \(error)")
+            // Send error response back to client
+            sendErrorResponse(id: requestId ?? .int(-1), code: -32603, message: error.localizedDescription)
         }
+    }
+
+    private func sendErrorResponse(id: MCPRequest.RequestID, code: Int, message: String) {
+        let errorResponse = MCPResponse(
+            id: id,
+            result: nil,
+            error: MCPResponse.MCPError(code: code, message: message)
+        )
+        sendResponse(errorResponse)
     }
 
     private func processRequest(_ request: MCPRequest) throws -> MCPResponse {
@@ -570,11 +587,31 @@ class MCPServer {
                 throw NSError(domain: "MCPServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Missing tool name"])
             }
 
-            let result = try callTool(toolName, arguments: params.arguments ?? [:])
+            // Handle tool execution errors gracefully and return them in the result content
+            let resultText: String
+            do {
+                resultText = try callTool(toolName, arguments: params.arguments ?? [:])
+            } catch {
+                // Return tool errors as content rather than JSON-RPC errors
+                // This provides better error messages to the user
+                let errorDetail: String
+                if let nsError = error as NSError? {
+                    errorDetail = nsError.localizedDescription
+                } else {
+                    errorDetail = error.localizedDescription
+                }
+
+                let errorResult = [
+                    "success": false,
+                    "error": errorDetail
+                ] as [String: Any]
+                resultText = try toJSON(errorResult)
+            }
+
             return MCPResponse(
                 id: request.id,
                 result: MCPResponse.Result(
-                    content: [MCPResponse.Result.Content(type: "text", text: result)],
+                    content: [MCPResponse.Result.Content(type: "text", text: resultText)],
                     tools: nil,
                     protocolVersion: nil,
                     capabilities: nil,
