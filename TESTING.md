@@ -80,7 +80,7 @@ You can also test manually by running the server and typing JSON requests:
 
 ```bash
 # Start the server
-.build/release/apple-reminders-mcp
+.build/release/apple-events-mcp
 
 # Then paste this request and press Enter:
 {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
@@ -135,8 +135,8 @@ Once testing is complete, integrate with Claude Desktop by adding to:
 ```json
 {
   "mcpServers": {
-    "apple-reminders": {
-      "command": "/absolute/path/to/apple-reminders-mcp/.build/release/apple-reminders-mcp"
+    "apple-events": {
+      "command": "/absolute/path/to/apple-events-mcp/.build/release/apple-events-mcp"
     }
   }
 }

@@ -3,7 +3,7 @@
 # Test Apple Reminders MCP Server
 # Usage: ./test.sh [list-tools|list-lists|list-reminders <list-name>]
 
-EXECUTABLE=".build/release/apple-reminders-mcp"
+EXECUTABLE=".build/release/apple-events-mcp"
 
 if [ ! -f "$EXECUTABLE" ]; then
     echo "❌ Error: Executable not found at $EXECUTABLE"

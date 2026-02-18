@@ -1,20 +1,26 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.0
 import PackageDescription
 
 let package = Package(
-    name: "AppleRemindersMCP",
+    name: "AppleEventsMCP",
     platforms: [
         .macOS(.v14)
     ],
     products: [
         .executable(
-            name: "apple-reminders-mcp",
-            targets: ["AppleRemindersMCP"]
+            name: "apple-events-mcp",
+            targets: ["AppleEventsMCP"]
         )
+    ],
+    dependencies: [
+        .package(url: "https://github.com/swhitty/FlyingFox.git", from: "0.26.0")
     ],
     targets: [
         .executableTarget(
-            name: "AppleRemindersMCP",
+            name: "AppleEventsMCP",
+            dependencies: [
+                .product(name: "FlyingFox", package: "FlyingFox")
+            ],
             path: "Sources"
         )
     ]

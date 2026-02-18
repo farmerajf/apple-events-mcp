@@ -1,33 +1,32 @@
-# Apple Reminders MCP Server
+# Apple Reminders & Calendar MCP Server
 
-A Model Context Protocol (MCP) server that integrates Apple Reminders with Claude Desktop, enabling **comprehensive task management and reminders** directly through conversations with Claude.
+A Model Context Protocol (MCP) server that integrates **Apple Reminders** and **Apple Calendar** with Claude, enabling task management and calendar scheduling directly through conversations.
 
-**Built entirely in Swift** using EventKit for native, fast, and reliable access to Apple Reminders.
-
-## Why Use This?
-
-Apple Reminders is a full-featured **task management system**, not just for simple reminders. This MCP server unlocks the full power of Apple Reminders for:
-
-- **Task Management**: Create, organize, and track tasks and todo items
-- **Project Organization**: Manage projects with separate lists and due dates
-- **Daily Planning**: Review what's due today or overdue with `list_today_reminders`
-- **Flexible Scheduling**: Set reminders with specific times or just dates
-- **Priority Management**: Organize tasks by priority levels (high/medium/low)
+**Built entirely in Swift** using EventKit for native, fast, and reliable access.
 
 ## Features
 
-- **List Management**: Create and list reminder lists (task categories)
-- **Task Operations**: Create, update, complete, and delete reminders
-- **Smart Filtering**: View today's tasks, filter by list or completion status
-- **Flexible Dates**: Support for both date-only and datetime formats
-- **Priority Levels**: Set task priority (0=none, 1-4=high, 5=medium, 6-9=low)
-- **Native Swift**: EventKit integration for maximum performance and reliability
+**Reminders / Task Management:**
+- Create, update, complete, and delete reminders across multiple lists
+- Daily planning with `list_today_reminders` (due today + overdue)
+- Priority levels (0=none, 1-4=high, 5=medium, 6-9=low)
+
+**Calendar Events:**
+- Create, update, and delete calendar events
+- View today's schedule with `list_today_events`
+- Query events by date range with `list_events`
+- Support for location, URL (video call links), and all-day events
+
+**Transport:**
+- Stdio for local use (Claude Desktop)
+- Streamable HTTP for remote access (Claude Web, iOS, etc.)
+- API key authentication for HTTP mode
 
 ## Prerequisites
 
 - macOS 14.0 (Sonoma) or later
 - Swift 5.9 or later
-- Claude Desktop app
+- Claude Desktop app (for stdio mode) or any MCP client (for HTTP mode)
 
 ## Installation
 
@@ -37,25 +36,64 @@ Apple Reminders is a full-featured **task management system**, not just for simp
 swift build -c release
 ```
 
-3. The executable will be built at `.build/release/apple-reminders-mcp`
+3. The executable will be built at `.build/release/apple-events-mcp`
 
-## Configuration
+## Transport Modes
 
-Add this server to your Claude Desktop configuration file at `~/Library/Application Support/Claude/claude_desktop_config.json`:
+### Stdio (default)
+
+For local use with Claude Desktop. No configuration file needed.
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
-    "apple-reminders": {
-      "command": "/absolute/path/to/apple-reminders-mcp/.build/release/apple-reminders-mcp"
+    "apple-events": {
+      "command": "/absolute/path/to/apple-events-mcp/.build/release/apple-events-mcp"
     }
   }
 }
 ```
 
+### Streamable HTTP
+
+For remote access from Claude Web, Claude iOS, or other MCP clients.
+
+1. Create a `config.json` in the working directory:
+
+```json
+{
+  "port": 3030,
+  "apiKey": "your-secret-api-key"
+}
+```
+
+Generate a secure API key:
+```bash
+openssl rand -hex 32
+```
+
+2. Start the server:
+```bash
+.build/release/apple-events-mcp --http
+```
+
+3. The MCP endpoint will be available at:
+```
+POST http://localhost:3030/{apiKey}/mcp
+```
+
+4. Health check (no auth required):
+```
+GET http://localhost:3030/health
+```
+
+**Important**: Use HTTPS in production (e.g., behind a reverse proxy) since the API key is in the URL path.
+
 ## Permissions
 
-The first time you run this, macOS will prompt you to grant Reminders access. Click "Allow".
+The first time you run this, macOS will prompt you to grant access to both Reminders and Calendar. Click "Allow" for each.
 
 ## License
 

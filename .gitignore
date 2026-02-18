@@ -10,5 +10,8 @@
 # Logs
 *.log
 
+# Config (contains API key)
+config.json
+
 # Claude Code settings
 .claude/

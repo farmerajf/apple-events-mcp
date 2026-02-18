@@ -3,13 +3,13 @@ import EventKit
 
 // MARK: - MCP Protocol Types
 
-struct MCPRequest: Codable {
+struct MCPRequest: Codable, Sendable {
     let jsonrpc: String
-    let id: RequestID
+    let id: RequestID?
     let method: String
     let params: Params?
 
-    enum RequestID: Codable {
+    enum RequestID: Codable, Sendable {
         case string(String)
         case int(Int)
 
@@ -35,27 +35,27 @@ struct MCPRequest: Codable {
         }
     }
 
-    struct Params: Codable {
+    struct Params: Codable, Sendable {
         let name: String?
         let arguments: [String: AnyCodable]?
         let protocolVersion: String?
         let capabilities: [String: AnyCodable]?
         let clientInfo: ClientInfo?
 
-        struct ClientInfo: Codable {
+        struct ClientInfo: Codable, Sendable {
             let name: String
             let version: String
         }
     }
 }
 
-struct MCPResponse: Codable {
-    let jsonrpc: String = "2.0"
-    let id: MCPRequest.RequestID
+struct MCPResponse: Codable, Sendable {
+    var jsonrpc: String = "2.0"
+    let id: MCPRequest.RequestID?
     let result: Result?
     let error: MCPError?
 
-    struct Result: Codable {
+    struct Result: Codable, Sendable {
         let content: [Content]?
         let tools: [Tool]?
         let protocolVersion: String?
@@ -63,35 +63,35 @@ struct MCPResponse: Codable {
         let serverInfo: ServerInfo?
         let instructions: String?
 
-        struct Content: Codable {
+        struct Content: Codable, Sendable {
             let type: String
             let text: String
         }
 
-        struct Capabilities: Codable {
+        struct Capabilities: Codable, Sendable {
             let tools: ToolsCapability?
 
-            struct ToolsCapability: Codable {
+            struct ToolsCapability: Codable, Sendable {
                 let listChanged: Bool?
             }
         }
 
-        struct ServerInfo: Codable {
+        struct ServerInfo: Codable, Sendable {
             let name: String
             let version: String
         }
 
-        struct Tool: Codable {
+        struct Tool: Codable, Sendable {
             let name: String
             let description: String
             let inputSchema: InputSchema
 
-            struct InputSchema: Codable {
+            struct InputSchema: Codable, Sendable {
                 let type: String
                 let properties: [String: Property]
                 let required: [String]?
 
-                struct Property: Codable {
+                struct Property: Codable, Sendable {
                     let type: String
                     let description: String
                 }
@@ -99,13 +99,13 @@ struct MCPResponse: Codable {
         }
     }
 
-    struct MCPError: Codable {
+    struct MCPError: Codable, Sendable {
         let code: Int
         let message: String
     }
 }
 
-struct AnyCodable: Codable {
+struct AnyCodable: Codable, @unchecked Sendable {
     let value: Any
 
     init(_ value: Any) {
@@ -156,7 +156,7 @@ struct AnyCodable: Codable {
 
 // MARK: - Reminders Manager
 
-class RemindersManager {
+class RemindersManager: @unchecked Sendable {
     private let eventStore = EKEventStore()
     private var hasAccess = false
 
@@ -469,84 +469,270 @@ class RemindersManager {
     }
 }
 
-// MARK: - MCP Server
+// MARK: - Calendar Manager
 
-class MCPServer {
-    private let remindersManager = RemindersManager()
+class CalendarManager: @unchecked Sendable {
+    private let eventStore = EKEventStore()
+    private var hasAccess = false
 
-    func start() async {
-        do {
-            try await remindersManager.requestAccess()
-            log("Successfully obtained access to Reminders")
-        } catch {
-            logError("Failed to get access to Reminders: \(error)")
-            exit(1)
-        }
-
-        log("Apple Reminders MCP Server running on stdio")
-
-        while let line = readLine() {
-            handleRequest(line)
+    func requestAccess() async throws {
+        hasAccess = try await eventStore.requestFullAccessToEvents()
+        if !hasAccess {
+            throw NSError(domain: "CalendarManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "Access to Calendar denied"])
         }
     }
 
-    private func handleRequest(_ line: String) {
-        guard let data = line.data(using: .utf8) else { return }
+    func listCalendars() -> [[String: Any]] {
+        let calendars = eventStore.calendars(for: .event)
+        return calendars.map { calendar in
+            [
+                "id": calendar.calendarIdentifier,
+                "name": calendar.title
+            ]
+        }
+    }
 
+    func getTodayEvents() -> [[String: Any]] {
+        let calendar = Calendar.current
+        let startOfToday = calendar.startOfDay(for: Date())
+        let endOfToday = calendar.date(byAdding: .day, value: 1, to: startOfToday)!
+        return getEvents(calendarName: nil, startDate: startOfToday, endDate: endOfToday)
+    }
+
+    func getEvents(calendarName: String?, startDate: Date, endDate: Date) -> [[String: Any]] {
+        let startTime = Date()
+        log("Starting getEvents from \(startDate) to \(endDate)")
+
+        let calendars: [EKCalendar]
+        if let calendarName = calendarName {
+            calendars = eventStore.calendars(for: .event).filter { $0.title == calendarName }
+            if calendars.isEmpty {
+                log("Calendar '\(calendarName)' not found")
+                return []
+            }
+        } else {
+            calendars = eventStore.calendars(for: .event)
+        }
+
+        let predicate = eventStore.predicateForEvents(withStart: startDate, end: endDate, calendars: calendars)
+        let events = eventStore.events(matching: predicate)
+
+        let fetchTime = Date().timeIntervalSince(startTime)
+        log("Fetched \(events.count) events in \(Int(fetchTime * 1000))ms")
+
+        return events.map { formatEvent($0) }
+    }
+
+    func createEvent(title: String, calendarName: String?, startDate: Date, endDate: Date, isAllDay: Bool, location: String?, notes: String?, url: String?) throws -> String {
+        let calendar: EKCalendar
+        if let calendarName = calendarName {
+            guard let found = eventStore.calendars(for: .event).first(where: { $0.title == calendarName }) else {
+                throw NSError(domain: "CalendarManager", code: 2, userInfo: [NSLocalizedDescriptionKey: "Calendar '\(calendarName)' not found"])
+            }
+            calendar = found
+        } else {
+            guard let defaultCalendar = eventStore.defaultCalendarForNewEvents else {
+                throw NSError(domain: "CalendarManager", code: 3, userInfo: [NSLocalizedDescriptionKey: "No default calendar available"])
+            }
+            calendar = defaultCalendar
+        }
+
+        let event = EKEvent(eventStore: eventStore)
+        event.calendar = calendar
+        event.title = title
+        event.startDate = startDate
+        event.endDate = endDate
+        event.isAllDay = isAllDay
+
+        if let location = location {
+            event.location = location
+        }
+        if let notes = notes {
+            event.notes = notes
+        }
+        if let urlString = url, let url = URL(string: urlString) {
+            event.url = url
+        }
+
+        try eventStore.save(event, span: .thisEvent, commit: true)
+        log("Created event '\(title)' with ID: \(event.eventIdentifier ?? "unknown")")
+        return event.eventIdentifier
+    }
+
+    func updateEvent(id: String, title: String?, startDate: Date?, endDate: Date?, location: String?, notes: String?, url: String?) throws {
+        guard let event = eventStore.event(withIdentifier: id) else {
+            throw NSError(domain: "CalendarManager", code: 4, userInfo: [NSLocalizedDescriptionKey: "Event not found"])
+        }
+
+        if let title = title {
+            event.title = title
+        }
+        if let startDate = startDate {
+            event.startDate = startDate
+        }
+        if let endDate = endDate {
+            event.endDate = endDate
+        }
+        if let location = location {
+            event.location = location
+        }
+        if let notes = notes {
+            event.notes = notes
+        }
+        if let urlString = url {
+            if urlString.isEmpty {
+                event.url = nil
+            } else {
+                event.url = URL(string: urlString)
+            }
+        }
+
+        try eventStore.save(event, span: .thisEvent, commit: true)
+    }
+
+    func deleteEvent(id: String) throws {
+        guard let event = eventStore.event(withIdentifier: id) else {
+            throw NSError(domain: "CalendarManager", code: 5, userInfo: [NSLocalizedDescriptionKey: "Event not found"])
+        }
+
+        try eventStore.remove(event, span: .thisEvent, commit: true)
+    }
+
+    private func formatEvent(_ event: EKEvent) -> [String: Any] {
+        let formatter = ISO8601DateFormatter()
+        var dict: [String: Any] = [
+            "id": event.eventIdentifier ?? "",
+            "title": event.title ?? "",
+            "startDate": formatter.string(from: event.startDate),
+            "endDate": formatter.string(from: event.endDate),
+            "isAllDay": event.isAllDay
+        ]
+
+        if let location = event.location, !location.isEmpty {
+            dict["location"] = location
+        }
+        if let notes = event.notes, !notes.isEmpty {
+            dict["notes"] = notes
+        }
+        if let calendar = event.calendar {
+            dict["calendarName"] = calendar.title
+        }
+        if let url = event.url {
+            dict["url"] = url.absoluteString
+        }
+
+        switch event.status {
+        case .confirmed: dict["status"] = "confirmed"
+        case .tentative: dict["status"] = "tentative"
+        case .canceled: dict["status"] = "canceled"
+        default: break
+        }
+
+        return dict
+    }
+}
+
+// MARK: - Date Parsing Helpers
+
+func parseDate(_ string: String) -> Date? {
+    // Try ISO8601 first (full datetime)
+    let iso8601Formatter = ISO8601DateFormatter()
+    if let date = iso8601Formatter.date(from: string) {
+        return date
+    }
+
+    // Try date-only format (YYYY-MM-DD)
+    let dateFormatter = DateFormatter()
+    dateFormatter.dateFormat = "yyyy-MM-dd"
+    dateFormatter.timeZone = TimeZone.current
+    return dateFormatter.date(from: string)
+}
+
+// MARK: - MCP Server (transport-agnostic)
+
+class MCPServer: @unchecked Sendable {
+    let remindersManager = RemindersManager()
+    let calendarManager = CalendarManager()
+
+    func requestAccess() async throws {
+        try await remindersManager.requestAccess()
+        log("Successfully obtained access to Reminders")
+        try await calendarManager.requestAccess()
+        log("Successfully obtained access to Calendar")
+    }
+
+    /// Process a raw JSON-RPC request and return raw JSON response data.
+    /// Returns nil for notifications (requests without an id).
+    func handleRequest(_ data: Data) -> Data? {
         // Try to decode the request to get the ID for error responses
         var requestId: MCPRequest.RequestID?
         if let partialRequest = try? JSONDecoder().decode(MCPRequest.self, from: data) {
             requestId = partialRequest.id
         }
 
+        // Notifications (no id) don't get a response
+        guard requestId != nil else {
+            log("Received notification, no response needed")
+            return nil
+        }
+
         do {
             let request = try JSONDecoder().decode(MCPRequest.self, from: data)
             let response = try processRequest(request)
-            sendResponse(response)
+            return encodeResponse(response)
         } catch {
             logError("Error processing request: \(error)")
-            // Send error response back to client
-            sendErrorResponse(id: requestId ?? .int(-1), code: -32603, message: error.localizedDescription)
+            let errorResponse = MCPResponse(
+                id: requestId,
+                result: nil,
+                error: MCPResponse.MCPError(code: -32603, message: error.localizedDescription)
+            )
+            return encodeResponse(errorResponse)
         }
     }
 
-    private func sendErrorResponse(id: MCPRequest.RequestID, code: Int, message: String) {
-        let errorResponse = MCPResponse(
-            id: id,
-            result: nil,
-            error: MCPResponse.MCPError(code: code, message: message)
-        )
-        sendResponse(errorResponse)
+    private func encodeResponse(_ response: MCPResponse) -> Data {
+        do {
+            return try JSONEncoder().encode(response)
+        } catch {
+            logError("Error encoding response: \(error)")
+            return Data(#"{"jsonrpc":"2.0","id":-1,"error":{"code":-32603,"message":"Internal encoding error"}}"#.utf8)
+        }
     }
 
     private func processRequest(_ request: MCPRequest) throws -> MCPResponse {
         switch request.method {
         case "initialize":
             let instructions = """
-            This server provides comprehensive access to Apple Reminders for both reminders AND task management.
+            This server provides full access to Apple Reminders and Apple Calendar via EventKit.
 
-            Apple Reminders is a full-featured task management system, not just for simple reminders. Use it for:
-            - Tasks and todo items (with or without due dates)
-            - Project management (create separate lists for different projects)
-            - Daily task planning and scheduling
-            - Recurring tasks and deadlines
-            - Priority-based task organization
+            REMINDERS (task management):
+            - Use list_reminder_lists before creating reminders to see available lists.
+            - Use list_today_reminders for a daily overview — it returns incomplete reminders due today or overdue.
+            - list_reminders returns incomplete reminders by default. Pass completed: true to see completed ones.
+            - create_reminder defaults to the "Reminders" list if no list_name is given.
+            - Priority levels: 0 = none, 1–4 = high, 5 = medium, 6–9 = low.
+            - Tags are not available via EventKit (Apple limitation).
 
-            USAGE BEST PRACTICES:
-            1. Use list_today_reminders to get an overview of what's due today or overdue
-            2. Create separate lists for different contexts (Work, Personal, Projects, Shopping, etc.)
-            3. Use list_reminder_lists to see existing lists before creating new ones
-            4. Dates can be provided in two formats:
-               - Full datetime: "2025-11-15T10:00:00Z" (with specific time)
-               - Date-only: "2025-11-15" (no specific time, all-day reminder)
-            5. Priority levels: 0=none, 1-4=high, 5=medium, 6-9=low
-            6. Tags and categories are not available via the API (EventKit limitation)
+            CALENDAR EVENTS:
+            - Use list_calendars before creating events to see available calendars.
+            - Use list_today_events to see today's full schedule across all calendars.
+            - list_events requires a start_date and end_date to define the query range.
+            - create_event requires title, start_date, and end_date. All other fields (calendar_name, location, notes, url, is_all_day) are optional.
+            - create_event uses the system default calendar if no calendar_name is given.
+            - Use the url field for video call links (Zoom, Google Meet, etc.).
+            - For all-day events, use date-only format and set is_all_day: true.
+            - update_event and delete_event operate on a single occurrence of recurring events.
 
-            SUGGESTED WORKFLOWS:
-            - Morning planning: Use list_today_reminders to review what's due
-            - Task capture: Create reminders quickly without due dates, organize later
-            - Project setup: Create a new list for each project, then add tasks
-            - Weekly review: List all incomplete reminders across all lists
+            DATE FORMATS (both reminders and calendar):
+            - Full datetime: "2025-11-15T10:00:00Z" (UTC, specific time)
+            - Date-only: "2025-11-15" (interpreted in the user's local timezone)
+
+            BEST PRACTICES:
+            - Morning planning: call list_today_reminders and list_today_events together for a full daily overview.
+            - When the user asks to schedule something, use create_event. When they ask to add a task or todo, use create_reminder.
+            - When looking up what's coming, use list_events with a date range (e.g., next 7 days).
+            - Always confirm destructive actions (delete_reminder, delete_event) with the user before executing.
             """
 
             return MCPResponse(
@@ -559,7 +745,7 @@ class MCPServer {
                         tools: MCPResponse.Result.Capabilities.ToolsCapability(listChanged: false)
                     ),
                     serverInfo: MCPResponse.Result.ServerInfo(
-                        name: "apple-reminders",
+                        name: "apple-events",
                         version: "1.0.0"
                     ),
                     instructions: instructions
@@ -761,6 +947,142 @@ class MCPServer {
                     ],
                     required: ["reminder_id"]
                 )
+            ),
+
+            // Calendar tools
+            MCPResponse.Result.Tool(
+                name: "list_calendars",
+                description: "Get all event calendars from Apple Calendar",
+                inputSchema: MCPResponse.Result.Tool.InputSchema(
+                    type: "object",
+                    properties: [:],
+                    required: nil
+                )
+            ),
+            MCPResponse.Result.Tool(
+                name: "list_today_events",
+                description: "Get all calendar events for today. Useful for seeing your schedule.",
+                inputSchema: MCPResponse.Result.Tool.InputSchema(
+                    type: "object",
+                    properties: [:],
+                    required: nil
+                )
+            ),
+            MCPResponse.Result.Tool(
+                name: "list_events",
+                description: "Get calendar events in a date range, optionally filtered by calendar name.",
+                inputSchema: MCPResponse.Result.Tool.InputSchema(
+                    type: "object",
+                    properties: [
+                        "calendar_name": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "Name of the calendar to filter by (optional, if not provided returns events from all calendars)"
+                        ),
+                        "start_date": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "Start of date range in ISO 8601 format (e.g., '2025-11-15T00:00:00Z') or date-only (e.g., '2025-11-15')"
+                        ),
+                        "end_date": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "End of date range in ISO 8601 format (e.g., '2025-11-16T00:00:00Z') or date-only (e.g., '2025-11-16')"
+                        )
+                    ],
+                    required: ["start_date", "end_date"]
+                )
+            ),
+            MCPResponse.Result.Tool(
+                name: "create_event",
+                description: "Create a new event in Apple Calendar",
+                inputSchema: MCPResponse.Result.Tool.InputSchema(
+                    type: "object",
+                    properties: [
+                        "title": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "Title of the event"
+                        ),
+                        "calendar_name": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "Name of the calendar to add the event to (optional, uses default calendar)"
+                        ),
+                        "start_date": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "Start date/time in ISO 8601 format (e.g., '2025-11-15T10:00:00Z') or date-only for all-day events (e.g., '2025-11-15')"
+                        ),
+                        "end_date": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "End date/time in ISO 8601 format (e.g., '2025-11-15T11:00:00Z') or date-only for all-day events (e.g., '2025-11-16')"
+                        ),
+                        "is_all_day": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "boolean",
+                            description: "Whether this is an all-day event (optional, defaults to false)"
+                        ),
+                        "location": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "Location of the event (optional)"
+                        ),
+                        "notes": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "Additional notes for the event (optional)"
+                        ),
+                        "url": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "URL associated with the event, e.g., a video call link (optional)"
+                        )
+                    ],
+                    required: ["title", "start_date", "end_date"]
+                )
+            ),
+            MCPResponse.Result.Tool(
+                name: "update_event",
+                description: "Update an existing calendar event's properties",
+                inputSchema: MCPResponse.Result.Tool.InputSchema(
+                    type: "object",
+                    properties: [
+                        "event_id": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "ID of the event to update"
+                        ),
+                        "title": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "New title for the event (optional)"
+                        ),
+                        "start_date": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "New start date/time in ISO 8601 format (optional)"
+                        ),
+                        "end_date": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "New end date/time in ISO 8601 format (optional)"
+                        ),
+                        "location": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "New location (optional)"
+                        ),
+                        "notes": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "New notes (optional)"
+                        ),
+                        "url": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "New URL, or empty string to clear (optional)"
+                        )
+                    ],
+                    required: ["event_id"]
+                )
+            ),
+            MCPResponse.Result.Tool(
+                name: "delete_event",
+                description: "Delete a calendar event",
+                inputSchema: MCPResponse.Result.Tool.InputSchema(
+                    type: "object",
+                    properties: [
+                        "event_id": MCPResponse.Result.Tool.InputSchema.Property(
+                            type: "string",
+                            description: "ID of the event to delete"
+                        )
+                    ],
+                    required: ["event_id"]
+                )
             )
         ]
     }
@@ -846,21 +1168,85 @@ class MCPServer {
             let result = ["success": true, "reminder_id": id] as [String : Any]
             return try toJSON(result)
 
+        // Calendar tools
+        case "list_calendars":
+            let calendars = calendarManager.listCalendars()
+            let result = ["calendars": calendars, "count": calendars.count] as [String : Any]
+            return try toJSON(result)
+
+        case "list_today_events":
+            let events = calendarManager.getTodayEvents()
+            let result = ["events": events, "count": events.count] as [String : Any]
+            return try toJSON(result)
+
+        case "list_events":
+            guard let startDateStr = arguments["start_date"]?.value as? String,
+                  let endDateStr = arguments["end_date"]?.value as? String else {
+                throw NSError(domain: "MCPServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Missing start_date or end_date"])
+            }
+
+            guard let startDate = parseDate(startDateStr) else {
+                throw NSError(domain: "MCPServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid start_date format"])
+            }
+            guard let endDate = parseDate(endDateStr) else {
+                throw NSError(domain: "MCPServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid end_date format"])
+            }
+
+            let calendarName = arguments["calendar_name"]?.value as? String
+            let events = calendarManager.getEvents(calendarName: calendarName, startDate: startDate, endDate: endDate)
+            let result = ["events": events, "count": events.count] as [String : Any]
+            return try toJSON(result)
+
+        case "create_event":
+            guard let title = arguments["title"]?.value as? String else {
+                throw NSError(domain: "MCPServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Missing title"])
+            }
+            guard let startDateStr = arguments["start_date"]?.value as? String,
+                  let startDate = parseDate(startDateStr) else {
+                throw NSError(domain: "MCPServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Missing or invalid start_date"])
+            }
+            guard let endDateStr = arguments["end_date"]?.value as? String,
+                  let endDate = parseDate(endDateStr) else {
+                throw NSError(domain: "MCPServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Missing or invalid end_date"])
+            }
+
+            let calendarName = arguments["calendar_name"]?.value as? String
+            let isAllDay = arguments["is_all_day"]?.value as? Bool ?? false
+            let location = arguments["location"]?.value as? String
+            let notes = arguments["notes"]?.value as? String
+            let url = arguments["url"]?.value as? String
+
+            let id = try calendarManager.createEvent(title: title, calendarName: calendarName, startDate: startDate, endDate: endDate, isAllDay: isAllDay, location: location, notes: notes, url: url)
+            let result = ["success": true, "event_id": id, "title": title] as [String : Any]
+            return try toJSON(result)
+
+        case "update_event":
+            guard let id = arguments["event_id"]?.value as? String else {
+                throw NSError(domain: "MCPServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Missing event_id"])
+            }
+
+            let title = arguments["title"]?.value as? String
+            let startDate = (arguments["start_date"]?.value as? String).flatMap { parseDate($0) }
+            let endDate = (arguments["end_date"]?.value as? String).flatMap { parseDate($0) }
+            let location = arguments["location"]?.value as? String
+            let notes = arguments["notes"]?.value as? String
+            let url = arguments["url"]?.value as? String
+
+            try calendarManager.updateEvent(id: id, title: title, startDate: startDate, endDate: endDate, location: location, notes: notes, url: url)
+            let result = ["success": true, "event_id": id] as [String : Any]
+            return try toJSON(result)
+
+        case "delete_event":
+            guard let id = arguments["event_id"]?.value as? String else {
+                throw NSError(domain: "MCPServer", code: 400, userInfo: [NSLocalizedDescriptionKey: "Missing event_id"])
+            }
+
+            try calendarManager.deleteEvent(id: id)
+            let result = ["success": true, "event_id": id] as [String : Any]
+            return try toJSON(result)
+
         default:
             throw NSError(domain: "MCPServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Unknown tool: \(name)"])
-        }
-    }
-
-    private func sendResponse(_ response: MCPResponse) {
-        do {
-            let encoder = JSONEncoder()
-            let data = try encoder.encode(response)
-            if let jsonString = String(data: data, encoding: .utf8) {
-                print(jsonString)
-                fflush(stdout)
-            }
-        } catch {
-            logError("Error encoding response: \(error)")
         }
     }
 
@@ -870,6 +1256,25 @@ class MCPServer {
             throw NSError(domain: "MCPServer", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to convert to JSON string"])
         }
         return string
+    }
+}
+
+// MARK: - Stdio Transport
+
+struct StdioTransport: Sendable {
+    let server: MCPServer
+
+    func run() {
+        log("Apple Reminders MCP Server running on stdio")
+
+        while let line = readLine() {
+            guard let data = line.data(using: .utf8) else { continue }
+            guard let responseData = server.handleRequest(data) else { continue }
+            if let jsonString = String(data: responseData, encoding: .utf8) {
+                print(jsonString)
+                fflush(stdout)
+            }
+        }
     }
 }
 
@@ -889,10 +1294,26 @@ func logError(_ message: String) {
 
 // MARK: - Main
 
-@main
-struct AppleRemindersMCP {
-    static func main() async {
-        let server = MCPServer()
-        await server.start()
+let server = MCPServer()
+
+do {
+    try await server.requestAccess()
+} catch {
+    logError("Failed to get access to Reminders: \(error)")
+    exit(1)
+}
+
+let args = CommandLine.arguments
+if args.contains("--http") {
+    do {
+        let config = try Config.load()
+        let transport = HTTPTransport(server: server, port: UInt16(config.port), apiKey: config.apiKey)
+        try await transport.run()
+    } catch {
+        logError("Failed to start HTTP server: \(error)")
+        exit(1)
     }
+} else {
+    let transport = StdioTransport(server: server)
+    transport.run()
 }

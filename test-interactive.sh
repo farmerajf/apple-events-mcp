@@ -3,7 +3,7 @@
 # Interactive test for Apple Reminders MCP Server
 # This lets you send individual requests and see responses
 
-EXECUTABLE=".build/release/apple-reminders-mcp"
+EXECUTABLE=".build/release/apple-events-mcp"
 
 if [ ! -f "$EXECUTABLE" ]; then
     echo "Error: Executable not found at $EXECUTABLE"
