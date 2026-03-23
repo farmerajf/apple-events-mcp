@@ -664,24 +664,37 @@ class MCPServer: @unchecked Sendable {
     /// Process a raw JSON-RPC request and return raw JSON response data.
     /// Returns nil for notifications (requests without an id).
     func handleRequest(_ data: Data) -> Data? {
-        // Try to decode the request to get the ID for error responses
+        // Try to decode the request to get the ID and method for logging
         var requestId: MCPRequest.RequestID?
+        var method: String?
         if let partialRequest = try? JSONDecoder().decode(MCPRequest.self, from: data) {
             requestId = partialRequest.id
+            method = partialRequest.method
         }
 
         // Notifications (no id) don't get a response
         guard requestId != nil else {
-            log("Received notification, no response needed")
+            log("[mcp] Notification: \(method ?? "unknown")")
             return nil
         }
+
+        let toolName = method == "tools/call"
+            ? (try? JSONDecoder().decode(MCPRequest.self, from: data))?.params?.name
+            : nil
+        let label = toolName != nil ? "\(method!) (\(toolName!))" : (method ?? "unknown")
+
+        let startTime = CFAbsoluteTimeGetCurrent()
 
         do {
             let request = try JSONDecoder().decode(MCPRequest.self, from: data)
             let response = try processRequest(request)
+            let elapsed = Int((CFAbsoluteTimeGetCurrent() - startTime) * 1000)
+            let isError = response.error != nil
+            log("[mcp] \(label): \(isError ? "error" : "ok") (\(elapsed)ms)")
             return encodeResponse(response)
         } catch {
-            logError("Error processing request: \(error)")
+            let elapsed = Int((CFAbsoluteTimeGetCurrent() - startTime) * 1000)
+            logError("[mcp] \(label): exception (\(elapsed)ms): \(error)")
             let errorResponse = MCPResponse(
                 id: requestId,
                 result: nil,
@@ -1282,8 +1295,8 @@ struct StdioTransport: Sendable {
 
 func log(_ message: String) {
     let timestamp = ISO8601DateFormatter().string(from: Date())
-    fputs("[\(timestamp)] \(message)\n", stderr)
-    fflush(stderr)
+    fputs("[\(timestamp)] \(message)\n", stdout)
+    fflush(stdout)
 }
 
 func logError(_ message: String) {
@@ -1309,8 +1322,11 @@ if args.contains("--http") {
         let config = try Config.load()
         let transport = HTTPTransport(server: server, port: UInt16(config.port), apiKey: config.apiKey)
         try await transport.run()
+    } catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == 48 {
+        logError("[server] Port is already in use")
+        exit(1)
     } catch {
-        logError("Failed to start HTTP server: \(error)")
+        logError("[server] Failed to start: \(error)")
         exit(1)
     }
 } else {
